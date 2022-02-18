@@ -3,6 +3,7 @@
 #include "estimators/essential_estimator.h"
 #include "estimators/fundamental_estimator.h"
 #include "estimators/homography_estimator.h"
+#include "estimators/essential_mat_3D.h"
 #include "model.h"
 
 namespace magsac
@@ -518,6 +519,7 @@ namespace magsac
 				return 1.0 / (4.0 * getGammaFunction());
 			}
 		};
+
 	}
 
 	namespace utils
@@ -536,5 +538,9 @@ namespace magsac
 		typedef estimator::HomographyEstimator<gcransac::estimator::solver::HomographyFourPointSolver, // The solver used for fitting a model to a minimal sample
 			gcransac::estimator::solver::HomographyFourPointSolver> // The solver used for fitting a model to a non-minimal sample
 			DefaultHomographyEstimator;
+
+		typedef estimator::EssentialMatrixEstimator<gcransac::estimator::solver::EssentialMatrixWithDepthFromThreePoints, // The solver used for fitting a model to a minimal sample
+			gcransac::estimator::solver::EssentialMatrixBundleAdjustmentSolver> // The solver used for fitting a model to a non-minimal sample
+			DefaultEssentialMatrix3PTEstimator;
 	}
 }

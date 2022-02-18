@@ -255,6 +255,109 @@ py::tuple findEssentialMatrix(
         ptr2[i] = E[i];
     return py::make_tuple(E_, inliers_);
 }
+
+
+py::tuple findEssentialMatrix3PT(
+	py::array_t<double>  correspondences_,
+    py::array_t<double>  K1_,
+    py::array_t<double>  K2_,
+    double w1, 
+    double h1,
+    double w2,
+    double h2,
+	py::array_t<double>  probabilities_,
+	int sampler,
+    bool use_magsac_plus_plus,
+    double sigma_th,
+    double conf,
+    int min_iters,
+    int max_iters,
+    int partition_num) 
+{
+	py::buffer_info buf1 = correspondences_.request();
+	size_t NUM_TENTS = buf1.shape[0];
+	size_t DIM = buf1.shape[1];
+
+	if (DIM != 6) {
+		throw std::invalid_argument("x1y1 should be an array with dims [n,6], n>=3");
+	}
+    if (NUM_TENTS < 3) {
+        throw std::invalid_argument("x1y1 should be an array with dims [n,6], n>=3");
+    }
+
+    double* ptr1 = (double*)buf1.ptr;
+    std::vector<double> correspondences;
+    correspondences.assign(ptr1, ptr1 + buf1.size);
+
+    py::buffer_info K1_buf = K1_.request();
+    size_t three_a = K1_buf.shape[0];
+    size_t three_b = K1_buf.shape[1];
+
+    if ((three_a != 3) || (three_b != 3)) {
+        throw std::invalid_argument("K1 shape should be [3x3]");
+    }
+    double* ptr1_k = (double*)K1_buf.ptr;
+    std::vector<double> K1;
+    K1.assign(ptr1_k, ptr1_k + K1_buf.size);
+
+    py::buffer_info K2_buf = K2_.request();
+    three_a = K2_buf.shape[0];
+    three_b = K2_buf.shape[1];
+
+    if ((three_a != 3) || (three_b != 3)) {
+        throw std::invalid_argument("K2 shape should be [3x3]");
+    }
+    double* ptr2_k = (double*)K2_buf.ptr;
+    std::vector<double> K2;
+    K2.assign(ptr2_k, ptr2_k + K2_buf.size);
+
+    std::vector<double> E(9);
+    std::vector<bool> inliers(NUM_TENTS);
+
+    std::vector<double> probabilities;
+    if (sampler == 3 || sampler == 4)
+    {
+        py::buffer_info buf_prob = probabilities_.request();
+        double* ptr_prob = (double*)buf_prob.ptr;
+        probabilities.assign(ptr_prob, ptr_prob + buf_prob.size);        
+    }
+
+    int num_inl = findEssentialMatrix3PT_(
+        correspondences,
+        inliers,
+        E,
+        K1, 
+        K2,
+        probabilities,
+        w1,
+        h1,
+        w2,
+        h2,
+        sampler,
+        use_magsac_plus_plus,
+        sigma_th,
+        conf,
+        min_iters,
+        max_iters,
+        partition_num);
+
+    py::array_t<bool> inliers_ = py::array_t<bool>(NUM_TENTS);
+    py::buffer_info buf3 = inliers_.request();
+    bool* ptr3 = (bool*)buf3.ptr;
+    for (size_t i = 0; i < NUM_TENTS; i++)
+        ptr3[i] = inliers[i];
+
+    if (num_inl == 0) {
+        return py::make_tuple(pybind11::cast<pybind11::none>(Py_None), inliers_);
+    }
+
+    py::array_t<double> E_ = py::array_t<double>({ 3,3 });
+    py::buffer_info buf2 = E_.request();
+    double* ptr2 = (double*)buf2.ptr;
+    for (size_t i = 0; i < 9; i++)
+        ptr2[i] = E[i];
+    return py::make_tuple(E_, inliers_);
+}
                                 
 py::tuple findHomography(
 	                     py::array_t<double>  correspondences_,
@@ -402,6 +505,23 @@ PYBIND11_PLUGIN(pymagsac) {
         py::arg("min_iters") = 50,
         py::arg("max_iters") = 1000,
         py::arg("partition_num") = 5); 
+
+    m.def("findEssentialMatrix3PT", &findEssentialMatrix3PT, R"doc(some doc)doc",
+        py::arg("correspondences"),
+        py::arg("K1"),
+        py::arg("K2"),
+        py::arg("w1"),
+        py::arg("h1"),
+        py::arg("w2"),
+        py::arg("h2"),
+        py::arg("probabilities"),
+		py::arg("sampler") = 4,
+        py::arg("use_magsac_plus_plus") = true,
+        py::arg("sigma_th") = 1.0,
+        py::arg("conf") = 0.99,
+        py::arg("min_iters") = 50,
+        py::arg("max_iters") = 1000,
+        py::arg("partition_num") = 5);
 
 
   return m.ptr();

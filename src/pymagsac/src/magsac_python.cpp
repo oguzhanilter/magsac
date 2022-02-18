@@ -312,6 +312,168 @@ int findEssentialMatrix_(std::vector<double>& correspondences,
     return num_inliers;
 }
 
+
+
+int findEssentialMatrix3PT_(std::vector<double>& correspondences,
+    std::vector<bool>& inliers,
+    std::vector<double>& E,
+    std::vector<double>& src_K,
+    std::vector<double>& dst_K,
+    std::vector<double>& inlier_probabilities,
+    double sourceImageWidth,
+    double sourceImageHeight,
+    double destinationImageWidth,
+    double destinationImageHeight,
+    int sampler_id,
+    bool use_magsac_plus_plus,
+    double sigma_max,
+    double conf,
+    int min_iters,
+    int max_iters,
+    int partition_num)
+{
+    int num_tents = correspondences.size() / 6;
+    cv::Mat points(num_tents, 6, CV_64F, &correspondences[0]);
+
+    Eigen::Matrix3d intrinsics_src,
+        intrinsics_dst;
+
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            intrinsics_src(i, j) = src_K[i * 3 + j];
+        }
+    }
+
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            intrinsics_dst(i, j) = dst_K[i * 3 + j];
+        }
+    }
+
+    const double &fx1 = intrinsics_src(0, 0);
+    const double &fy1 = intrinsics_src(1, 1);
+    const double &fx2 = intrinsics_dst(0, 0);
+    const double &fy2 = intrinsics_dst(1, 1);
+
+    const double threshold_normalizer =
+        (fx1 + fx2 + fy1 + fy2) / 4.0;
+    const double normalized_sigma_max =
+        sigma_max / threshold_normalizer;
+
+    cv::Mat normalized_points(points.size(), CV_64F);
+    gcransac::utils::normalizeCorrespondences(points,
+        intrinsics_src,
+        intrinsics_dst,
+        normalized_points);
+
+    magsac::utils::DefaultEssentialMatrix3PTEstimator estimator(
+        intrinsics_src,
+        intrinsics_dst); // The robust essential matrix estimator class
+    gcransac::EssentialMatrix model; // The estimated model
+
+    MAGSAC<cv::Mat, magsac::utils::DefaultEssentialMatrix3PTEstimator> magsac(
+        use_magsac_plus_plus ?
+            MAGSAC<cv::Mat, magsac::utils::DefaultEssentialMatrix3PTEstimator>::MAGSAC_PLUS_PLUS : 
+            MAGSAC<cv::Mat, magsac::utils::DefaultEssentialMatrix3PTEstimator>::MAGSAC_ORIGINAL);
+
+    magsac.setMaximumThreshold(normalized_sigma_max); // The maximum noise scale sigma allowed
+    magsac.setCoreNumber(1); // The number of cores used to speed up sigma-consensus
+    magsac.setPartitionNumber(partition_num); // The number partitions used for speeding up sigma consensus. As the value grows, the algorithm become slower and, usually, more accurate.
+    magsac.setIterationLimit(max_iters);
+	magsac.setMinimumIterationNumber(min_iters);
+    magsac.setReferenceThreshold(magsac.getReferenceThreshold() / threshold_normalizer); // The reference threshold inside MAGSAC++ should also be normalized.
+	
+	// Initialize the samplers
+	// The main sampler is used for sampling in the main RANSAC loop
+	typedef gcransac::sampler::Sampler<cv::Mat, size_t> AbstractSampler;
+	std::unique_ptr<AbstractSampler> main_sampler;
+	if (sampler_id == 0) // Initializing a RANSAC-like uniformly random sampler
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::UniformSampler(&points));
+	else if (sampler_id == 1)  // Initializing a PROSAC sampler. This requires the points to be ordered according to the quality.
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::ProsacSampler(&points, estimator.sampleSize()));
+	else if (sampler_id == 2) // Initializing a Progressive NAPSAC sampler
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::ProgressiveNapsacSampler<4>(&points,
+			{ 16, 8, 4, 2 },	// The layer of grids. The cells of the finest grid are of dimension 
+								// (source_image_width / 16) * (source_image_height / 16)  * (destination_image_width / 16)  (destination_image_height / 16), etc.
+			estimator.sampleSize(), // The size of a minimal sample
+			{ static_cast<double>(sourceImageWidth), // The width of the source image
+				static_cast<double>(sourceImageHeight), // The height of the source image
+				static_cast<double>(destinationImageWidth), // The width of the destination image
+				static_cast<double>(destinationImageHeight) },  // The height of the destination image
+			0.5)); // The length (i.e., 0.5 * <point number> iterations) of fully blending to global sampling 
+	else if (sampler_id == 3)
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::ImportanceSampler(&points, 
+            inlier_probabilities,
+            estimator.sampleSize()));
+	else if (sampler_id == 4)
+    {
+		double variance = 0.1;
+        double max_prob = 0;
+        for (const auto &prob : inlier_probabilities)
+            max_prob = MAX(max_prob, prob);
+        for (auto &prob : inlier_probabilities)
+            prob /= max_prob;
+		main_sampler = std::unique_ptr<AbstractSampler>(new gcransac::sampler::AdaptiveReorderingSampler(&points, 
+            inlier_probabilities,
+            estimator.sampleSize(),
+            variance));
+	}
+	else
+	{
+		fprintf(stderr, "Unknown sampler identifier: %d. The accepted samplers are 0 (uniform sampling), 1 (PROSAC sampling), 2 (P-NAPSAC sampling), 3 (NG-RANSAC sampler), 4 (AR-Sampler)\n",
+			sampler_id);
+		return 0;
+	}
+
+    ModelScore score;
+    bool success = magsac.run(normalized_points, // The data points
+        conf, // The required confidence in the results
+        estimator, // The used estimator
+        *main_sampler.get(), // The sampler used for selecting minimal samples in each iteration
+        model, // The estimated model
+        max_iters, // The number of iterations
+        score); // The score of the estimated model
+    inliers.resize(num_tents);
+
+    if (!success) {
+        for (auto pt_idx = 0; pt_idx < points.rows; ++pt_idx) {
+            inliers[pt_idx] = false;
+        }
+        E.resize(9);
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                E[i * 3 + j] = 0;
+            }
+        }
+        return 0;
+    }
+
+    int num_inliers = 0;
+    for (auto pt_idx = 0; pt_idx < points.rows; ++pt_idx) {
+        const int is_inlier = 
+            estimator.residual(normalized_points.row(pt_idx), model.descriptor) <= normalized_sigma_max;
+        inliers[pt_idx] = (bool)is_inlier;
+        num_inliers += is_inlier;
+    }
+
+    E.resize(9);
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            E[i * 3 + j] = (double)model.descriptor(i, j);
+        }
+    }
+    
+	// It is ugly: the unique_ptr does not check for virtual descructors in the base class.
+	// Therefore, the derived class's objects are not deleted automatically. 
+	// This causes a memory leaking. I hate C++.
+	AbstractSampler *sampler_ptr = main_sampler.release();
+	delete sampler_ptr;
+
+    return num_inliers;
+}
+
+
+
 int findHomography_(std::vector<double>& correspondences,
                     std::vector<bool>& inliers,
                     std::vector<double>& H,
